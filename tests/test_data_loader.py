@@ -1,10 +1,8 @@
-"""Tests for src/data_loader.py"""
+# Tests for src/data_loader.py
 import numpy as np
 import pytest
 from src.data_loader import load_gnss, load_imu, align_imu_to_gnss, load_ground_truth, load_gnss_log
 
-
-# ── load_gnss ─────────────────────────────────────────────────────────────────
 
 def test_load_gnss_columns(sample_device_dir):
     df = load_gnss(sample_device_dir)
@@ -21,11 +19,8 @@ def test_load_gnss_columns(sample_device_dir):
 def test_load_gnss_pseudorange_valid(sample_device_dir):
     df = load_gnss(sample_device_dir)
     pr = df["pseudorange_m"].dropna()
-    # Pseudoranges must be positive and within plausible Earth-satellite range
     assert (pr > 1e6).all() and (pr < 9e7).all()
 
-
-# ── load_imu ──────────────────────────────────────────────────────────────────
 
 def test_load_imu_message_types(sample_device_dir):
     imu = load_imu(sample_device_dir)
@@ -42,19 +37,14 @@ def test_align_imu_has_expected_columns(sample_device_dir):
                 "gyro_x", "gyro_y", "gyro_z",
                 "mag_x", "mag_y", "mag_z"):
         assert col in aligned.columns, f"Missing {col}"
-    # One row per epoch
     assert len(aligned) == len(epochs)
 
-
-# ── load_ground_truth ─────────────────────────────────────────────────────────
 
 def test_load_ground_truth(sample_device_dir):
     gt = load_ground_truth(sample_device_dir)
     assert {"LatitudeDegrees", "LongitudeDegrees", "UnixTimeMillis"}.issubset(gt.columns)
     assert len(gt) > 0
 
-
-# ── load_gnss_log ─────────────────────────────────────────────────────────────
 
 def test_load_gnss_log_raw(sample_device_dir):
     log = load_gnss_log(sample_device_dir)

@@ -1,22 +1,18 @@
-"""
-main.py
-=======
-End-to-end pipeline orchestrator for the Google Smartphone Decimeter Challenge 2022.
-
-Pipeline structure (per trip/device) follows Taro Suzuki's approach:
-1. Load raw GNSS data
-2. Carrier-phase smoothing (Hatch filter)
-3. Robust WLS position + velocity (cauchy loss)
-4. Outlier rejection (velocity/height thresholds)
-5. Forward-backward Kalman smoother
-
-See gnss_solver.py for full attribution. Post-processing (SavGol smoothing,
-median filtering) and ML correction are original to this project.
-
-CLI usage:
-    python src/main.py --root kaggle_dataset --output submission.csv --split test
-    python src/main.py --root kaggle_dataset --evaluate --n-trips 5
-"""
+# main.py
+# End-to-end pipeline orchestrator for the Google Smartphone Decimeter Challenge 2022.
+#
+# Pipeline per trip/device (adapted from Taro Suzuki's approach):
+# 1. Load raw GNSS data
+# 2. Carrier-phase smoothing (Hatch filter)
+# 3. Robust WLS position + velocity (cauchy loss)
+# 4. Outlier rejection (velocity/height thresholds)
+# 5. Forward-backward Kalman smoother
+#
+# See gnss_solver.py for full attribution.
+#
+# CLI usage:
+#   python src/main.py --root kaggle_dataset --output submission.csv --split test
+#   python src/main.py --root kaggle_dataset --evaluate --n-trips 5
 
 import argparse
 import pathlib
@@ -34,8 +30,6 @@ from src.post_processing import (
 )
 
 
-# ── Single-trip processor ─────────────────────────────────────────────────────
-
 def process_trip(
     device_dir: pathlib.Path,
     train: bool = True,
@@ -44,15 +38,11 @@ def process_trip(
     use_savgol: bool = False,
     use_stop_averaging: bool = False,
 ) -> pd.DataFrame:
-    """
-    Run the full pipeline for one (trip, device) directory.
-
-    Returns DataFrame: UnixTimeMillis, LatitudeDegrees, LongitudeDegrees
-    """
+    # Run the full pipeline for one (trip, device) directory.
+    # Returns DataFrame: UnixTimeMillis, LatitudeDegrees, LongitudeDegrees
     device_dir = pathlib.Path(device_dir)
     device_name = device_dir.name
 
-    # ── 1. Load data ──────────────────────────────────────────────────────
     gnss_df = load_gnss_raw(device_dir)
 
     if len(gnss_df) == 0:
@@ -60,7 +50,6 @@ def process_trip(
             columns=["UnixTimeMillis", "LatitudeDegrees", "LongitudeDegrees"]
         )
 
-    # ── 2-6. Robust solver pipeline ──────────────────────────────────────
     result = solve_trip_robust(gnss_df, device_name=device_name,
                                sat_weight_model=sat_weight_model)
 
@@ -79,16 +68,14 @@ def process_trip(
     pos_df["LatitudeDegrees"] = pos_df["LatitudeDegrees"].interpolate().ffill().bfill()
     pos_df["LongitudeDegrees"] = pos_df["LongitudeDegrees"].interpolate().ffill().bfill()
 
-    # Light median filter for remaining spikes
     pos_df = median_filter_trajectory(pos_df, kernel_size=3)
 
-    # Optional IMU-based stop detection: average positions within stationary segments
+    # Optional IMU-based stop detection
     if use_stop_averaging:
         try:
             imu_df = load_imu(device_dir)
             if len(imu_df) > 0:
                 aligned_imu = align_imu_to_gnss(imu_df, pos_df["UnixTimeMillis"].values)
-                # Attach horizontal acceleration to pos_df for stop detection
                 stop_input = pos_df.copy()
                 stop_input["accel_x"] = aligned_imu["accel_x"].values
                 stop_input["accel_y"] = aligned_imu["accel_y"].values
@@ -96,13 +83,11 @@ def process_trip(
                 stop_input["is_stop"] = is_stop.values
                 pos_df = apply_stop_averaging(stop_input)
         except Exception:
-            pass  # IMU unavailable or malformed — silently skip
+            pass
 
-    # Optional Savitzky-Golay smoothing (preserves trends better than median)
     if use_savgol:
         pos_df = savgol_smooth_trajectory(pos_df, window_length=7, polyorder=2)
 
-    # Optional OSRM snap-to-road (requires network access)
     if osrm:
         speeds = np.zeros(len(pos_df))
         snapped_lats, snapped_lons = osrm_snap_to_road(
@@ -117,10 +102,8 @@ def process_trip(
     return pos_df[["UnixTimeMillis", "LatitudeDegrees", "LongitudeDegrees"]]
 
 
-# ── Accuracy evaluation ───────────────────────────────────────────────────────
-
 def haversine_m(lat1, lon1, lat2, lon2):
-    """Haversine great-circle distance in metres."""
+    # Haversine great-circle distance in metres.
     R = 6_371_000.0
     phi1 = np.deg2rad(lat1)
     phi2 = np.deg2rad(lat2)
@@ -131,7 +114,7 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 
 def evaluate_accuracy(pred_df, gt_df):
-    """Compute accuracy metrics by nearest-epoch matching."""
+    # Compute accuracy metrics by nearest-epoch matching.
     gt = gt_df.sort_values("UnixTimeMillis")
     pred = pred_df.sort_values("UnixTimeMillis")
 
@@ -163,18 +146,15 @@ def evaluate_accuracy(pred_df, gt_df):
     }
 
 
-# ── Full-split submission generator ──────────────────────────────────────────
-
 def run_full_submission(dataset_root, output_path, split="test", osrm=False,
                         use_ml=False, ml_models=None, use_sat_weights=False,
                         use_savgol=False, use_stop_averaging=False,
                         adaptive_blend=False, ml_blend=1.0):
-    """Process all trips in a dataset split and write a Kaggle submission CSV."""
+    # Process all trips in a dataset split and write a Kaggle submission CSV.
     dataset_root = pathlib.Path(dataset_root)
     split_dir = dataset_root / split
     all_rows = []
 
-    # Load sample_submission for exact timestamps
     sample_path = dataset_root / "sample_submission.csv"
     sample_ts = {}
     if sample_path.exists():
@@ -182,7 +162,6 @@ def run_full_submission(dataset_root, output_path, split="test", osrm=False,
         for trip_id, grp in sample_df.groupby("tripId"):
             sample_ts[trip_id] = np.sort(grp["UnixTimeMillis"].values)
 
-    # Satellite weight model
     sat_weight_model = None
     if use_sat_weights:
         try:
@@ -193,7 +172,6 @@ def run_full_submission(dataset_root, output_path, split="test", osrm=False,
         except Exception as exc:
             print(f"Warning: Could not load sat weight model: {exc}. Using default weights.")
 
-    # ML models
     lat_model, lon_model = None, None
     if use_ml and ml_models is not None:
         lat_model, lon_model = ml_models
@@ -207,7 +185,6 @@ def run_full_submission(dataset_root, output_path, split="test", osrm=False,
             print(f"Warning: Could not load ML models: {exc}. Running without ML.")
             use_ml = False
 
-    # Process each trip
     trip_dirs = sorted(split_dir.iterdir())
     for trip_dir in tqdm(trip_dirs, desc=f"Processing {split}"):
         if not trip_dir.is_dir():
@@ -297,10 +274,8 @@ def run_full_submission(dataset_root, output_path, split="test", osrm=False,
     return submission
 
 
-# ── Accuracy report ───────────────────────────────────────────────────────────
-
 def run_accuracy_report(dataset_root, n_trips=5, osrm=False):
-    """Evaluate accuracy on training trips and print a report."""
+    # Evaluate accuracy on training trips and print a report.
     dataset_root = pathlib.Path(dataset_root)
     train_dir = dataset_root / "train"
     report_rows = []
@@ -336,12 +311,10 @@ def run_accuracy_report(dataset_root, n_trips=5, osrm=False):
     median_agg = float(np.nanmean(report["median_m"].values))
     p95_agg = float(np.nanmean(report["p95_m"].values))
 
-    print("\n" + "=" * 60)
-    print("AGGREGATE ACCURACY (across evaluated trips)")
+    print(f"\nAGGREGATE ACCURACY (across evaluated trips)")
     print(f"  Mean error   : {mean_agg:.2f} m  (target <= 2 m, hard limit 3 m)")
     print(f"  Median error : {median_agg:.2f} m  (target <= 1.5 m, hard limit 2.5 m)")
     print(f"  P95 error    : {p95_agg:.2f} m  (target <= 5 m, hard limit 8 m)")
-    print("=" * 60)
 
     failures = []
     if mean_agg > 3.0:
@@ -369,51 +342,38 @@ def run_accuracy_report(dataset_root, n_trips=5, osrm=False):
     return report
 
 
-# ── ML training entry point ──────────────────────────────────────────────────
-
 def run_ml_training(dataset_root, n_trips=None):
-    """Train ML correction models on training data."""
+    # Train ML correction models on training data.
     from src.ml_correction import (
         build_training_dataset, train_correction_model, save_models
     )
-    print("=" * 60)
     print("ML CORRECTION MODEL TRAINING")
-    print("=" * 60)
 
-    # Build training dataset
     train_df = build_training_dataset(dataset_root, n_trips=n_trips)
     if len(train_df) == 0:
         print("No training data. Aborting.")
         return
 
-    # Save training data for analysis
     train_df.to_csv("ml_training_data.csv", index=False)
     print(f"Training data saved to ml_training_data.csv ({len(train_df)} rows)")
 
-    # Train models with CV
     lat_model, lon_model, cv_df = train_correction_model(train_df)
 
-    # Save models
     save_models(lat_model, lon_model)
 
-    # Save CV results
     cv_df.to_csv("ml_cv_results.csv", index=False)
     print(f"CV results saved to ml_cv_results.csv")
 
     return lat_model, lon_model
 
 
-# ── Satellite weight model training ──────────────────────────────────────────
-
 def run_sat_weight_training(dataset_root, n_trips=None):
-    """Train a satellite-level LightGBM model for WLS weighting."""
+    # Train a satellite-level LightGBM model for WLS weighting.
     import joblib
     from src.data_loader import load_gnss
     from src.feature_engineering import build_feature_matrix, train_lgbm_residual_model
 
-    print("=" * 60)
     print("SATELLITE WEIGHT MODEL TRAINING")
-    print("=" * 60)
 
     dataset_root = pathlib.Path(dataset_root)
     train_dir = dataset_root / "train"
@@ -458,8 +418,6 @@ def run_sat_weight_training(dataset_root, n_trips=None):
     return model
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GNSS Decimeter Challenge pipeline")
     parser.add_argument("--root", default="kaggle_dataset")
@@ -491,7 +449,7 @@ if __name__ == "__main__":
         n = args.n_trips if args.n_trips != 5 else None
         run_sat_weight_training(pathlib.Path(args.root), n_trips=n)
     elif args.train_ml:
-        n = args.n_trips if args.n_trips != 5 else None  # default=all trips
+        n = args.n_trips if args.n_trips != 5 else None
         run_ml_training(pathlib.Path(args.root), n_trips=n)
     elif args.evaluate:
         run_accuracy_report(pathlib.Path(args.root), n_trips=args.n_trips, osrm=args.osrm)

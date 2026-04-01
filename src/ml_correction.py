@@ -1,28 +1,18 @@
-"""
-ml_correction.py
-================
-LightGBM-based per-epoch lat/lon error correction for the GNSS pipeline.
-
-Approach: Train two LightGBM regressors to predict lat/lon errors
-(predicted - true) from per-epoch features, then subtract predictions
-from the classical pipeline output.
-
-The position-level ML correction approach was used by multiple top-10
-finishers in the Google Smartphone Decimeter Challenge 2022.
-This implementation is original.
-
-Phone-specific error modelling (PHONE_MODELS encoding) and vehicle
-heading features (cos_bearing, sin_bearing) were inspired by
-J.B.O. Mitchell's phone-specific bias correction notebooks:
-  https://www.kaggle.com/code/jbomitchell/phone-specific-bias-corrections-clipped
-which built on saitodevel01's bias analysis from the 2021 competition:
-  https://www.kaggle.com/code/saitodevel01/gsdc-bias-eda
-  https://www.kaggle.com/code/saitodevel01/gsdc-bias-correction
-
-Additional competition references that informed the approach:
-  Alejandro Cuevas (Kaggle: pollicio) -- https://www.kaggle.com/pollicio
-  Taro Suzuki (Kaggle: taroz1461) -- see gnss_solver.py for full attribution
-"""
+# ml_correction.py
+# LightGBM-based per-epoch lat/lon error correction for the GNSS pipeline.
+#
+# Train two LightGBM regressors to predict lat/lon errors (predicted - true)
+# from per-epoch features, then subtract predictions from pipeline output.
+#
+# Position-level ML correction was used by multiple top-10 finishers in
+# the Google Smartphone Decimeter Challenge 2022. This implementation is original.
+#
+# Phone-specific error modelling and vehicle heading features inspired by
+# J.B.O. Mitchell's phone-specific bias correction notebooks:
+#   https://www.kaggle.com/code/jbomitchell/phone-specific-bias-corrections-clipped
+# Built on saitodevel01's bias analysis from the 2021 competition:
+#   https://www.kaggle.com/code/saitodevel01/gsdc-bias-eda
+#   https://www.kaggle.com/code/saitodevel01/gsdc-bias-correction
 
 import pathlib
 import numpy as np
@@ -36,9 +26,7 @@ from src.data_loader import load_gnss_raw, load_ground_truth
 from src.gnss_solver import solve_trip_robust
 from src.post_processing import median_filter_trajectory
 
-
-# ── Phone model encoding ─────────────────────────────────────────────────────
-
+# Phone model encoding
 PHONE_MODELS = {
     "GooglePixel4": 0,
     "GooglePixel4XL": 1,
@@ -47,8 +35,7 @@ PHONE_MODELS = {
     "XiaomiMi8": 4,
 }
 
-# ── Feature columns for ML model ─────────────────────────────────────────────
-
+# Feature columns for ML model
 FEATURE_COLS = [
     "n_sats_pos", "n_sats_vel", "n_sats_raw",
     "mean_cn0", "std_cn0", "min_cn0", "max_cn0",
@@ -71,10 +58,8 @@ FEATURE_COLS = [
 MODEL_DIR = pathlib.Path("models")
 
 
-# ── Bearing ───────────────────────────────────────────────────────────────────
-
 def _compute_bearing_deg(lat1, lon1, lat2, lon2):
-    """Forward bearing in degrees clockwise from north."""
+    # Forward bearing in degrees clockwise from north.
     lat1r, lat2r = np.deg2rad(lat1), np.deg2rad(lat2)
     dlon = np.deg2rad(lon2 - lon1)
     x = np.sin(dlon) * np.cos(lat2r)
@@ -82,10 +67,8 @@ def _compute_bearing_deg(lat1, lon1, lat2, lon2):
     return np.rad2deg(np.arctan2(x, y)) % 360
 
 
-# ── Haversine ─────────────────────────────────────────────────────────────────
-
 def haversine_m(lat1, lon1, lat2, lon2):
-    """Haversine great-circle distance in metres."""
+    # Haversine great-circle distance in metres.
     R = 6_371_000.0
     phi1, phi2 = np.deg2rad(lat1), np.deg2rad(lat2)
     dphi = np.deg2rad(lat2 - lat1)
@@ -94,18 +77,14 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return R * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
 
-# ── Feature engineering ───────────────────────────────────────────────────────
-
 def add_rolling_features(df):
-    """Add rolling statistics to feature DataFrame."""
+    # Add rolling statistics to feature DataFrame.
     df = df.copy()
 
-    # Speed rolling
     for w in [5, 15]:
         df[f"speed_mean_{w}"] = df["speed_mps"].rolling(w, min_periods=1, center=True).mean()
         df[f"speed_std_{w}"] = df["speed_mps"].rolling(w, min_periods=1, center=True).std().fillna(0)
 
-    # Position jitter (std of lat/lon changes as proxy for trajectory roughness)
     if "lat" in df.columns and "lon" in df.columns:
         lat_diff = df["lat"].diff().abs()
         lon_diff = df["lon"].diff().abs()
@@ -113,7 +92,6 @@ def add_rolling_features(df):
         for w in [5, 15]:
             df[f"pos_jitter_{w}"] = jitter.rolling(w, min_periods=1, center=True).mean()
 
-        # Position jump (haversine from previous epoch)
         df["position_jump_m"] = haversine_m(
             df["lat"].values,
             df["lon"].values,
@@ -121,14 +99,12 @@ def add_rolling_features(df):
             df["lon"].shift(1).bfill().values,
         )
 
-        # Position acceleration (second derivative)
         df["lat_accel"] = df["lat"].diff().diff().fillna(0)
         df["lon_accel"] = df["lon"].diff().diff().fillna(0)
 
-        # Epoch consistency: std of position over 5-epoch window
         df["epoch_consistency_5"] = jitter.rolling(5, min_periods=1, center=True).std().fillna(0)
 
-        # Vehicle heading features (heading-dependent satellite bias correction)
+        # Vehicle heading features
         if len(df) >= 2:
             lat_v = df["lat"].values
             lon_v = df["lon"].values
@@ -139,7 +115,7 @@ def add_rolling_features(df):
             df["cos_bearing"] = np.cos(bearing_rad)
             df["sin_bearing"] = np.sin(bearing_rad)
             bearing_s = pd.Series(bearing)
-            # Wrap-around-safe absolute delta (e.g. 355→5 = 10°, not 350°)
+            # Wrap-around-safe absolute delta (e.g. 355->5 = 10 deg, not 350)
             raw_delta = bearing_s.diff().abs()
             wrapped = np.minimum(raw_delta, 360.0 - raw_delta).fillna(0)
             df["bearing_change_rate"] = wrapped.values
@@ -161,24 +137,14 @@ def add_rolling_features(df):
         df["bearing_change_rate"] = 0.0
         df["bearing_std_5"] = 0.0
 
-    # C/N0 and HDOP rolling
     df["cn0_mean_5"] = df["mean_cn0"].rolling(5, min_periods=1, center=True).mean()
     df["hdop_mean_5"] = df["hdop"].rolling(5, min_periods=1, center=True).mean()
-
-    # HDOP change rate
     df["hdop_change"] = df["hdop"].diff().fillna(0)
-
-    # WLS residual rolling mean
     df["residual_mean_5"] = df["wls_residual_norm"].rolling(5, min_periods=1, center=True).mean()
-
-    # Pseudorange uncertainty change rate
     df["pr_unc_change"] = df["mean_pr_unc"].diff().fillna(0)
-
-    # New features: speed change, satellite count change
     df["speed_change"] = df["speed_mps"].diff().abs().fillna(0)
     df["n_sats_change"] = df["n_sats_pos"].diff().fillna(0).astype(float)
 
-    # Time since start
     if "utcTimeMillis" in df.columns:
         t0 = df["utcTimeMillis"].iloc[0]
         df["time_since_start"] = (df["utcTimeMillis"] - t0) / 1000.0
@@ -190,10 +156,7 @@ def add_rolling_features(df):
 
 def process_trip_with_features(device_dir, device_name, sat_weight_model=None,
                                use_dualfreq=False, sigma_mahalanobis=30.0):
-    """
-    Run pipeline on a single trip and return (pos_df, features_df) with
-    positions and per-epoch ML features.
-    """
+    # Run pipeline on a single trip, return (pos_df, features_df).
     gnss_df = load_gnss_raw(device_dir)
     if len(gnss_df) == 0:
         return pd.DataFrame(), pd.DataFrame()
@@ -206,7 +169,6 @@ def process_trip_with_features(device_dir, device_name, sat_weight_model=None,
     if len(result) == 0 or len(feat_df) == 0:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Build position DataFrame (same as process_trip)
     pos_df = pd.DataFrame({
         "UnixTimeMillis": result["epoch_ms"].values.astype(np.int64),
         "LatitudeDegrees": result["lat"].values,
@@ -215,30 +177,19 @@ def process_trip_with_features(device_dir, device_name, sat_weight_model=None,
     pos_df["LatitudeDegrees"] = pos_df["LatitudeDegrees"].interpolate().ffill().bfill()
     pos_df["LongitudeDegrees"] = pos_df["LongitudeDegrees"].interpolate().ffill().bfill()
 
-    # Median filter
     pos_df = median_filter_trajectory(pos_df, kernel_size=3)
 
-    # Add pipeline lat/lon to features for location-aware correction
     feat_df["lat"] = pos_df["LatitudeDegrees"].values
     feat_df["lon"] = pos_df["LongitudeDegrees"].values
-
-    # Add phone model encoding
     feat_df["phone_model"] = PHONE_MODELS.get(device_name, -1)
-
-    # Add rolling features
     feat_df = add_rolling_features(feat_df)
 
     return pos_df, feat_df
 
 
-# ── Training dataset builder ─────────────────────────────────────────────────
-
 def build_training_dataset(dataset_root, n_trips=None, use_dualfreq=False, sigma_mahalanobis=30.0):
-    """
-    Extract features and targets from all training trips.
-
-    Returns DataFrame with features + lat_error + lon_error columns.
-    """
+    # Extract features and targets from all training trips.
+    # Returns DataFrame with features + lat_error + lon_error columns.
     dataset_root = pathlib.Path(dataset_root)
     train_dir = dataset_root / "train"
 
@@ -266,7 +217,6 @@ def build_training_dataset(dataset_root, n_trips=None, use_dualfreq=False, sigma
                 if len(pos_df) == 0 or len(feat_df) == 0:
                     continue
 
-                # Match predictions to ground truth
                 gt = gt.sort_values("UnixTimeMillis")
                 gt_t = gt["UnixTimeMillis"].values
                 gt_lat = gt["LatitudeDegrees"].values
@@ -284,17 +234,14 @@ def build_training_dataset(dataset_root, n_trips=None, use_dualfreq=False, sigma
                 dt_prev = np.abs(gt_t[idx_prev] - pred_t)
                 idx = np.where(dt_prev < dt_curr, idx_prev, idx)
 
-                # Compute errors (prediction - truth)
                 lat_error = pred_lat - gt_lat[idx]
                 lon_error = pred_lon - gt_lon[idx]
 
-                # Add to features
                 feat_df = feat_df.copy()
                 feat_df["lat_error"] = lat_error
                 feat_df["lon_error"] = lon_error
                 feat_df["trip_id"] = trip_id
 
-                # Compute haversine error for monitoring
                 feat_df["haversine_error_m"] = haversine_m(
                     pred_lat, pred_lon, gt_lat[idx], gt_lon[idx])
 
@@ -317,15 +264,9 @@ def build_training_dataset(dataset_root, n_trips=None, use_dualfreq=False, sigma
     return train_df
 
 
-# ── Model training ────────────────────────────────────────────────────────────
-
 def train_correction_model(train_df, n_folds=5):
-    """
-    Train LightGBM lat/lon error correction models with trip-level CV.
-
-    Returns (lat_model, lon_model, cv_results_df).
-    """
-    # Prepare features
+    # Train LightGBM lat/lon error correction models with trip-level CV.
+    # Returns (lat_model, lon_model, cv_results_df).
     cols_present = [c for c in FEATURE_COLS if c in train_df.columns]
     print(f"Using {len(cols_present)} features: {cols_present}")
 
@@ -337,7 +278,6 @@ def train_correction_model(train_df, n_folds=5):
     y_lon = df["lon_error"].values
     groups = df["trip_id"].values
 
-    # Trip-level GroupKFold
     gkf = GroupKFold(n_splits=n_folds)
     cv_errors = []
 
@@ -356,29 +296,23 @@ def train_correction_model(train_df, n_folds=5):
                   eval_set=[(X_val, y_lat_val)],
                   callbacks=[lgb.early_stopping(50, verbose=False)])
 
-        # Train lon model
         lon_m = lgb.LGBMRegressor(**lgbm_params)
         lon_m.fit(X_tr, y_lon_tr,
                   eval_set=[(X_val, y_lon_val)],
                   callbacks=[lgb.early_stopping(50, verbose=False)])
 
-        # Validation predictions
-        pred_lat_corr = X_val.values @ np.zeros(len(cols_present))  # placeholder
         val_df = df.iloc[val_idx].copy()
         val_df["corrected_lat"] = val_df["lat"].values - lat_m.predict(X_val)
         val_df["corrected_lon"] = val_df["lon"].values - lon_m.predict(X_val)
 
-        # Match back to ground truth to compute corrected error
         for trip_id, trip_grp in val_df.groupby("trip_id"):
             orig_lat = trip_grp["lat"].values
             orig_lon = trip_grp["lon"].values
             corr_lat = trip_grp["corrected_lat"].values
             corr_lon = trip_grp["corrected_lon"].values
 
-            # Original errors
             orig_err = trip_grp["haversine_error_m"].values
 
-            # Corrected errors (lat_error = pred - true, so corrected = pred - predicted_error)
             gt_lat = orig_lat - trip_grp["lat_error"].values
             gt_lon = orig_lon - trip_grp["lon_error"].values
             corr_err = haversine_m(corr_lat, corr_lon, gt_lat, gt_lon)
@@ -402,12 +336,8 @@ def train_correction_model(train_df, n_folds=5):
 
     cv_df = pd.DataFrame(cv_errors)
 
-    # Print CV summary
-    print("\n" + "=" * 70)
-    print("CROSS-VALIDATION RESULTS (leave-trips-out)")
-    print("=" * 70)
+    print("\nCROSS-VALIDATION RESULTS (leave-trips-out)")
     print(f"  {'Metric':<25} {'Original':>12} {'Corrected':>12} {'Delta':>10}")
-    print(f"  {'-'*25} {'-'*12} {'-'*12} {'-'*10}")
     metrics = [("Mean error (m)", "orig_mean", "corr_mean"),
                ("P50 error (m)", "orig_p50", "corr_p50"),
                ("P95 error (m)", "orig_p95", "corr_p95")]
@@ -424,16 +354,8 @@ def train_correction_model(train_df, n_folds=5):
         per_device["comp_metric"] = (per_device[p50_col] + per_device[p95_col]) / 2
         comp = per_device["comp_metric"].mean()
         print(f"    {label}: {comp:.3f} m")
-    print("=" * 70)
 
-    # Train final models on ALL data with best iteration from CV
-    best_iters = []
-    for fold_i, (train_idx, val_idx) in enumerate(gkf.split(X, y_lat, groups)):
-        # Already computed above — just collect best iterations
-        pass
-    # Use average of fold best iterations, or default to 500
-    avg_iter = 500  # Will be overridden by early stopping in CV
-
+    # Train final models on ALL data
     print("\nTraining final models on all data...")
     final_params = dict(
         n_estimators=500, learning_rate=0.05, num_leaves=31,
@@ -446,7 +368,6 @@ def train_correction_model(train_df, n_folds=5):
     lon_model = lgb.LGBMRegressor(**final_params)
     lon_model.fit(X, y_lon)
 
-    # Feature importance
     print("\nTop 15 feature importances (lat model):")
     imp = pd.Series(lat_model.feature_importances_, index=cols_present)
     for feat, val in imp.nlargest(15).items():
@@ -455,10 +376,8 @@ def train_correction_model(train_df, n_folds=5):
     return lat_model, lon_model, cv_df
 
 
-# ── Model persistence ─────────────────────────────────────────────────────────
-
 def save_models(lat_model, lon_model, model_dir=None):
-    """Save trained models to disk."""
+    # Save trained models to disk.
     if model_dir is None:
         model_dir = MODEL_DIR
     model_dir = pathlib.Path(model_dir)
@@ -469,7 +388,7 @@ def save_models(lat_model, lon_model, model_dir=None):
 
 
 def load_models(model_dir=None):
-    """Load trained models from disk."""
+    # Load trained models from disk.
     if model_dir is None:
         model_dir = MODEL_DIR
     model_dir = pathlib.Path(model_dir)
@@ -478,28 +397,11 @@ def load_models(model_dir=None):
     return lat_model, lon_model
 
 
-# ── Inference ─────────────────────────────────────────────────────────────────
-
 def apply_correction(pos_df, feat_df, lat_model, lon_model, blend=1.0,
                      cap_degrees=None, adaptive_blend=False):
-    """
-    Apply ML error correction.
-
-    Parameters
-    ----------
-    pos_df : DataFrame with UnixTimeMillis, LatitudeDegrees, LongitudeDegrees
-    feat_df : per-epoch feature DataFrame from process_trip_with_features
-    lat_model, lon_model : trained LightGBM models
-    blend : correction strength (0.0 = no correction, 1.0 = full correction)
-    cap_degrees : if set, clip corrections to this magnitude (in degrees)
-    adaptive_blend : if True, scale blend per-epoch using HDOP — epochs with
-        good geometry (low HDOP) get 50% blend; poor geometry gets 100%.
-        This prevents over-correcting already-accurate fixes.
-
-    Returns
-    -------
-    Corrected pos_df
-    """
+    # Apply ML error correction to positions.
+    # blend: correction strength (0=none, 1=full)
+    # adaptive_blend: scale blend per-epoch using HDOP (low HDOP -> 50% blend, high -> 100%)
     cols_present = [c for c in FEATURE_COLS if c in feat_df.columns]
     X = feat_df[cols_present].fillna(0.0)
 
@@ -510,11 +412,9 @@ def apply_correction(pos_df, feat_df, lat_model, lon_model, blend=1.0,
         pred_lat_err = np.clip(pred_lat_err, -cap_degrees, cap_degrees)
         pred_lon_err = np.clip(pred_lon_err, -cap_degrees, cap_degrees)
 
-    # Per-epoch blend: scale blend by HDOP-based confidence
     if adaptive_blend and "hdop" in feat_df.columns:
         hdop = np.where(np.isfinite(feat_df["hdop"].values),
-                        feat_df["hdop"].values, 2.5)  # default to mid-range on NaN
-        # blend_i = 0.5 at HDOP=1.5, linearly up to 1.0 at HDOP=4.0
+                        feat_df["hdop"].values, 2.5)
         blend_arr = np.clip(blend * (0.5 + 0.5 * (hdop - 1.5) / 2.5), 0.5 * blend, blend)
     else:
         blend_arr = blend

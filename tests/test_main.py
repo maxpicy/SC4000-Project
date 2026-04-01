@@ -1,4 +1,4 @@
-"""Integration test for src/main.py"""
+# Integration test for src/main.py
 import pathlib
 import numpy as np
 import pytest

@@ -1,4 +1,4 @@
-"""Tests for src/post_processing.py"""
+# Tests for src/post_processing.py
 import numpy as np
 import pandas as pd
 import pytest
@@ -30,7 +30,6 @@ def test_detect_stops_stationary():
 def test_detect_stops_moving():
     df = _make_pos_df(n=30, is_stop=False)
     stops = detect_stops(df)
-    # At least some epochs should be detected as moving
     assert stops.sum() < len(df), "Some epochs should be detected as moving"
 
 
@@ -53,18 +52,14 @@ def test_apply_stop_averaging_moving_unchanged():
 
 def test_median_filter_removes_spike():
     df = pd.DataFrame({
-        "LatitudeDegrees":  [37.0, 37.0001, 37.5, 37.0002, 37.0003],  # spike at idx 2
+        "LatitudeDegrees":  [37.0, 37.0001, 37.5, 37.0002, 37.0003],
         "LongitudeDegrees": [-122.0] * 5,
     })
     out = median_filter_trajectory(df, kernel_size=3)
-    # After filtering, the spike at idx 2 should be reduced
     assert abs(out["LatitudeDegrees"].iloc[2] - 37.0) < 0.1
 
 
-# ── osrm_snap_to_road ─────────────────────────────────────────────────────────
-
 def test_osrm_snap_returns_original_on_network_error():
-    """When OSRM request fails, original coordinates are returned unchanged."""
     lats  = np.array([37.4000, 37.4001, 37.4002])
     lons  = np.array([-122.1000, -122.1001, -122.1002])
     speeds = np.array([10.0, 10.0, 10.0])
@@ -77,12 +72,10 @@ def test_osrm_snap_returns_original_on_network_error():
 
 
 def test_osrm_snap_applies_when_distance_within_threshold():
-    """When OSRM returns a nearby road point, positions are snapped."""
     lats   = np.array([37.4000])
     lons   = np.array([-122.1000])
     speeds = np.array([10.0])
 
-    # Simulate OSRM returning a point 5 m away
     snapped_lat = 37.40005
     snapped_lon = -122.10005
     mock_resp = MagicMock()
@@ -100,7 +93,6 @@ def test_osrm_snap_applies_when_distance_within_threshold():
 
 
 def test_osrm_snap_skips_when_distance_exceeds_threshold():
-    """When OSRM road point is too far, original coordinates are kept."""
     lats   = np.array([37.4000])
     lons   = np.array([-122.1000])
     speeds = np.array([10.0])
@@ -120,10 +112,9 @@ def test_osrm_snap_skips_when_distance_exceeds_threshold():
 
 
 def test_osrm_snap_skips_stopped_vehicle():
-    """Stopped vehicles (speed < 0.5 m/s) must not be snapped."""
     lats   = np.array([37.4000])
     lons   = np.array([-122.1000])
-    speeds = np.array([0.1])    # stopped
+    speeds = np.array([0.1])
 
     mock_resp = MagicMock()
     mock_resp.json.return_value = {
@@ -151,6 +142,5 @@ def test_ensemble_submissions_uniform():
     shifted["LatitudeDegrees"]  = [37.2, 37.3]
     shifted["LongitudeDegrees"] = [-122.2, -122.3]
     ens = ensemble_submissions([base, shifted])
-    # Uniform average
     np.testing.assert_allclose(ens["LatitudeDegrees"].values,  [37.1, 37.2])
     np.testing.assert_allclose(ens["LongitudeDegrees"].values, [-122.1, -122.2])

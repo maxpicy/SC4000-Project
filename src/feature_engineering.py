@@ -1,47 +1,26 @@
-"""
-feature_engineering.py
-======================
-Per-satellite feature engineering and LightGBM residual prediction model.
-
-Original implementation. The concept of using ML to predict per-satellite
-pseudorange residuals for WLS weighting is inspired by techniques from the
-Google Smartphone Decimeter Challenge 2022 competition community.
-
-Computes per-satellite observation features and trains/applies a LightGBM model
-that predicts pseudorange residual errors (multipath / NLOS detection).
-
-Coordinate transforms
----------------------
-WGS-84 ECEF ↔ geodetic conversions are done with pyproj's Transformer.
-
-The feature matrix has one row per (epoch, satellite) observation and is used
-to predict the expected |pseudorange residual| in metres.  The reciprocal
-square of that prediction is used as a per-satellite weight in the WLS solver:
-
-    weight_i = 1 / max(σ_i, floor)²
-
-where σ_i is the LightGBM prediction for satellite i.
-
-WGS-84 constants used in the manual ECEF→ENU rotation
-------------------------------------------------------
-a  = 6 378 137.0 m       (semi-major axis)
-e² = 6.694 379 990 14e-3 (first eccentricity squared)
-"""
+# feature_engineering.py
+# Per-satellite feature engineering and LightGBM residual prediction model.
+#
+# Original implementation. ML prediction of per-satellite pseudorange residuals
+# inspired by Google Smartphone Decimeter Challenge 2022 community techniques.
+#
+# The feature matrix has one row per (epoch, satellite) observation.
+# The reciprocal square of predicted |residual| is used as WLS weight:
+#   weight_i = 1 / max(sigma_i, floor)^2
 
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from pyproj import Transformer
 
-# ── WGS-84 ───────────────────────────────────────────────────────────────────
+# WGS-84 constants
 WGS84_A  = 6_378_137.0
 WGS84_E2 = 6.694_379_990_14e-3
 
 _lla2ecef = Transformer.from_crs("EPSG:4326", "EPSG:4978", always_xy=False)
 _ecef2lla = Transformer.from_crs("EPSG:4978", "EPSG:4326", always_xy=False)
 
-# ── Feature columns used by LightGBM ─────────────────────────────────────────
-# Only columns guaranteed to exist in the dataset are included.
+# Feature columns used by LightGBM (only columns guaranteed to exist)
 FEATURE_COLS = [
     "elevation_deg",
     "azimuth_deg",
@@ -55,27 +34,15 @@ FEATURE_COLS = [
     "TroposphericDelayMeters",
     "ConstellationType",
     "MultipathIndicator",
-    "pr_minus_geometric_m",    # engineered: pseudorange residual after clock removal
+    "pr_minus_geometric_m",    # pseudorange residual after clock removal
     "adr_valid",               # bool cast to int
 ]
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
-
 def _lla_to_ecef_np(lat_deg: np.ndarray,
                     lon_deg: np.ndarray,
                     alt_m: np.ndarray) -> np.ndarray:
-    """
-    Vectorised geodetic (degrees) → ECEF (metres).
-
-    Uses the standard closed-form conversion:
-        N  = a / sqrt(1 − e² sin²φ)
-        x  = (N + h) cosφ cosλ
-        y  = (N + h) cosφ sinλ
-        z  = (N(1−e²) + h) sinφ
-
-    Returns (N, 3) array in metres.
-    """
+    # Vectorised geodetic (degrees) to ECEF (metres). Returns (N, 3) array.
     lat = np.deg2rad(lat_deg)
     lon = np.deg2rad(lon_deg)
     N = WGS84_A / np.sqrt(1.0 - WGS84_E2 * np.sin(lat) ** 2)
@@ -88,20 +55,9 @@ def _lla_to_ecef_np(lat_deg: np.ndarray,
 def _add_elev_azim_from_ecef(df: pd.DataFrame,
                               ref_lat_arr: np.ndarray,
                               ref_lon_arr: np.ndarray) -> pd.DataFrame:
-    """
-    Compute per-row elevation and azimuth from ECEF positions.
-
-    This is used as a fallback if SvElevationDegrees is unavailable.
-    The ENU rotation matrix at each receiver position maps the line-of-sight
-    vector from ECEF into East-North-Up:
-
-        e_East  = [−sinλ,        cosλ,      0     ]
-        e_North = [−sinφ cosλ,  −sinφ sinλ,  cosφ  ]
-        e_Up    = [ cosφ cosλ,   cosφ sinλ,  sinφ  ]
-
-    elevation = arcsin(Up / ‖LOS‖)
-    azimuth   = arctan2(East, North)  (clockwise from North)
-    """
+    # Compute per-row elevation and azimuth from ECEF positions.
+    # Fallback if SvElevationDegrees is unavailable.
+    # Uses ENU rotation matrix at each receiver position.
     lat = np.deg2rad(ref_lat_arr)
     lon = np.deg2rad(ref_lon_arr)
     sl, cl = np.sin(lat), np.cos(lat)
@@ -124,42 +80,19 @@ def _add_elev_azim_from_ecef(df: pd.DataFrame,
     return df
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-
 def build_feature_matrix(
     gnss_df: pd.DataFrame,
     ground_truth_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Construct the per-observation feature matrix for LightGBM.
-
-    Steps
-    -----
-    1. Derive per-epoch receiver ECEF from the Kaggle-provided WLS baseline.
-    2. Compute geometric range from receiver to each satellite.
-    3. Estimate per-epoch clock bias as the median pseudorange residual
-       (robust to multipath outliers via median).
-    4. Compute ``pr_minus_geometric_m`` = pseudorange − geometric range − clock_bias.
-    5. If ground truth is available, compute ``target_residual_m`` for training.
-
-    Target (training only)
-    ----------------------
-    For each observation we compute what the pseudorange residual *should* be
-    if the receiver were at the ground-truth position.  The absolute value of
-    this residual is what LightGBM learns to predict.
-
-    Parameters
-    ----------
-    gnss_df          : output of load_gnss()
-    ground_truth_df  : output of load_ground_truth() — empty for test split
-
-    Returns
-    -------
-    DataFrame with all GNSS columns plus engineered features and target.
-    """
+    # Construct per-observation feature matrix for LightGBM.
+    # 1. Derive per-epoch receiver ECEF from WLS baseline
+    # 2. Compute geometric range to each satellite
+    # 3. Estimate per-epoch clock bias as median pseudorange residual
+    # 4. Compute pr_minus_geometric_m = pseudorange - geometric range - clock_bias
+    # 5. If ground truth available, compute target_residual_m for training
     df = gnss_df.copy()
 
-    # ── 1. Per-epoch receiver position from WLS ECEF ──────────────────────
+    # 1. Per-epoch receiver position from WLS ECEF
     wls_x_col = "WlsPositionXEcefMeters"
     wls_y_col = "WlsPositionYEcefMeters"
     wls_z_col = "WlsPositionZEcefMeters"
@@ -171,26 +104,23 @@ def build_feature_matrix(
     )
     df = df.join(epoch_ref, on="epoch_ms")
 
-    # ── 2. Geometric range per satellite ──────────────────────────────────
+    # 2. Geometric range per satellite
     sv_xyz = df[["SvPositionXEcefMeters",
                  "SvPositionYEcefMeters",
                  "SvPositionZEcefMeters"]].values
     rx_xyz = df[["rx_x", "rx_y", "rx_z"]].values
     geo_rng = np.linalg.norm(sv_xyz - rx_xyz, axis=1)
 
-    # ── 3. Per-epoch clock bias (median residual) ─────────────────────────
+    # 3. Per-epoch clock bias (median residual)
     df["_raw_res"] = df["pseudorange_m"] - geo_rng
     df["clock_bias_m"] = df.groupby("epoch_ms")["_raw_res"].transform("median")
 
-    # ── 4. Cleaned residual feature ───────────────────────────────────────
+    # 4. Cleaned residual feature
     df["pr_minus_geometric_m"] = df["_raw_res"] - df["clock_bias_m"]
     df.drop(columns=["_raw_res"], inplace=True)
 
-    # Ensure elevation/azimuth columns exist (they should from load_gnss)
+    # Ensure elevation/azimuth columns exist
     if "elevation_deg" not in df.columns or df["elevation_deg"].isna().all():
-        rx_lat = df.groupby("epoch_ms")["rx_x"].transform("first")
-        rx_lon = df.groupby("epoch_ms")["rx_y"].transform("first")
-        # Approximate lat/lon from WLS ECEF via pyproj
         rx_lat_v, rx_lon_v, _ = _ecef2lla.transform(
             df["rx_x"].values, df["rx_y"].values, df["rx_z"].values,
             radians=False
@@ -200,19 +130,18 @@ def build_feature_matrix(
     # Cast bool to int for LightGBM
     df["adr_valid"] = df["adr_valid"].astype(int)
 
-    # ── 5. Ground truth target (train only) ──────────────────────────────
+    # 5. Ground truth target (train only)
     if ground_truth_df is not None and len(ground_truth_df) > 0:
         gt = ground_truth_df.sort_values("UnixTimeMillis")
         gt_t   = gt["UnixTimeMillis"].values
         gt_lat = gt["LatitudeDegrees"].values
         gt_lon = gt["LongitudeDegrees"].values
 
-        # Nearest-epoch join: snap each GNSS epoch_ms to closest GT timestamp
+        # Nearest-epoch join
         epoch_arr = df["epoch_ms"].values
         idx = np.searchsorted(gt_t, epoch_arr, side="left")
         idx = np.clip(idx, 0, len(gt_t) - 1)
 
-        # Compare adjacent timestamps and pick the closer one
         idx_prev = np.maximum(idx - 1, 0)
         dt_curr  = np.abs(gt_t[idx]      - epoch_arr)
         dt_prev  = np.abs(gt_t[idx_prev] - epoch_arr)
@@ -236,26 +165,9 @@ def train_lgbm_residual_model(
     n_estimators: int = 300,
     learning_rate: float = 0.05,
 ) -> lgb.LGBMRegressor:
-    """
-    Train a LightGBM regressor to predict |pseudorange residual| in metres.
-
-    The model learns:
-        f(satellite_features) → expected absolute residual (metres)
-
-    This captures multipath and NLOS degradation patterns.  Satellites with
-    large predicted residuals are down-weighted in the WLS solver:
-        weight_i = 1 / σ_i²  where σ_i = max(f(x_i), floor)
-
-    Parameters
-    ----------
-    feature_df    : output of build_feature_matrix() with target_residual_m set
-    n_estimators  : number of boosting rounds
-    learning_rate : LightGBM learning rate
-
-    Returns
-    -------
-    Fitted LGBMRegressor
-    """
+    # Train LightGBM to predict |pseudorange residual| in metres.
+    # Satellites with large predicted residuals are down-weighted in WLS:
+    #   weight_i = 1 / max(f(x_i), floor)^2
     train_mask = (
         feature_df["target_residual_m"].notna() &
         feature_df["pseudorange_m"].notna()
@@ -283,26 +195,7 @@ def predict_satellite_weights(
     model: lgb.LGBMRegressor,
     floor_m: float = 1.0,
 ) -> np.ndarray:
-    """
-    Compute per-observation WLS weights from LightGBM predictions.
-
-    Formula
-    -------
-        weight_i = 1 / max(predicted_residual_m_i, floor_m)²
-
-    A ``floor_m`` floor prevents division-by-zero and keeps the weight matrix
-    numerically stable even for near-perfect satellites (predicted error ≈ 0).
-
-    Parameters
-    ----------
-    feature_df : same schema as training data (target column not required)
-    model      : fitted model from train_lgbm_residual_model()
-    floor_m    : minimum sigma in metres (default 1 m)
-
-    Returns
-    -------
-    1-D numpy array of positive weights, one per row in feature_df
-    """
+    # Compute per-observation WLS weights: weight = 1 / max(predicted_residual, floor)^2
     cols_present = [c for c in FEATURE_COLS if c in feature_df.columns]
     X = feature_df[cols_present].fillna(0.0)
     pred_residual = model.predict(X)

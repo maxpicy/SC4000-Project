@@ -1,4 +1,4 @@
-"""Tests for src/feature_engineering.py"""
+# Tests for src/feature_engineering.py
 import numpy as np
 import pytest
 from src.data_loader import load_gnss, load_ground_truth
@@ -20,7 +20,7 @@ def test_feature_matrix_shape(sample_device_dir):
 
 
 def test_feature_matrix_no_gt(sample_device_dir):
-    """build_feature_matrix works when ground truth is absent (test split)."""
+    # build_feature_matrix works when ground truth is absent (test split).
     import pandas as pd
     gnss = load_gnss(sample_device_dir)
     feat = build_feature_matrix(gnss, pd.DataFrame())
