@@ -3,6 +3,8 @@
 GNSS positioning pipeline for the [Google Smartphone Decimeter Challenge 2022](https://www.kaggle.com/competitions/smartphone-decimeter-2022) on Kaggle. Predicts phone position from raw GNSS measurements to decimeter-level accuracy.
 
 **Best score:** 2.466m private / 2.524m public
+**Position:**  56/573 on Public leaderboard
+*Note: Official Submission to kaggle public/private leaderboard is not as Competition has already closed*
 
 ## Pipeline
 
@@ -54,6 +56,4 @@ Reference: Suzuki, T. (2023). "Precise Position Estimation Using Smartphone Raw 
 
 Phone-specific bias modelling was inspired by [J.B.O. Mitchell's](https://www.kaggle.com/jbomitchell) phone-specific bias correction and tectonic correction notebooks, which built on [saitodevel01's](https://www.kaggle.com/code/saitodevel01/gsdc-bias-eda) lever arm bias analysis from the 2021 competition.
 
-Additional references: [Alejandro Cuevas (pollicio)](https://www.kaggle.com/pollicio).
-
-The ML correction approach (per-epoch LightGBM error prediction) was used by multiple top-10 finishers. This implementation is original. See `src/gnss_solver.py` and `src/ml_correction.py` headers for detailed attribution.
+All code and implementation in this project is original. See `src/gnss_solver.py` and `src/ml_correction.py` headers for detailed attribution.
